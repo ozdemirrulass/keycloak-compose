@@ -1,0 +1,141 @@
+x-logging-json:
+  &json-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "10"
+
+services:
+  mysql:
+    image: "mysql:${MYSQL_VERSION}"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 1s
+      timeout: 10s
+    environment:
+      MYSQL_DATABASE: keycloak
+      MYSQL_USER: keycloak
+      MYSQL_PASSWORD: password
+      MYSQL_ROOT_PASSWORD: password
+    volumes:
+      - ./mysql_data:/var/lib/mysql
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 525M
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - keycloak
+    logging: *json-logging
+
+  keycloak:
+    image: "quay.io/keycloak/keycloak:${KC_VERSION}"
+    command: ["start-dev", "-Dkeycloak.import=/opt/keycloak/data/import/realm.json"]
+    restart: unless-stopped
+    depends_on:
+      - mysql
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:9080"]
+    environment:
+      - KC_DB=mysql
+      - KC_DB_USERNAME=keycloak
+      - KC_DB_PASSWORD=password
+      - KC_DB_URL=jdbc:mysql://mysql:3306/keycloak
+      - KC_METRICS_ENABLED=true
+      - KC_FEATURES=${KC_FEATURES}
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=${KC_PASSWORD}
+    ports:
+      - ${KC_PORT}:8080
+    volumes:
+      - ./realms/realm.json:/opt/keycloak/data/import/realm.json:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1100M
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - keycloak
+      - monitoring
+    logging: *json-logging
+
+  prometheus:
+    image: "prom/prometheus:${PROMETHEUS_VERSION}"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.wal-compression'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    depends_on:
+      - keycloak
+    healthcheck:
+      test: ["CMD", "wget", "--tries=1", "--spider", "http://localhost:9090"]
+      interval: 1s
+      timeout: 10s
+    ports:
+      - ${PROMETHEUS_PORT}:9090
+    volumes:
+      - prometheus_data:/prometheus
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 525M
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - monitoring
+    logging: *json-logging
+
+  grafana:
+    image: "grafana/grafana:${GRAFANA_VERSION}"
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 1s
+      timeout: 10s
+    environment:
+      - GF_PLUGINS_ENABLE_ALPHA=true
+      - GF_PLUGINS_PLUGIN_ADMIN_ENABLED=true
+      - GF_LOG_MODE=console
+      - GF_AUTH_BASIC_ENABLED=true
+      - GF_AUTH_GENERIC_OAUTH_TLS_SKIP_VERIFY_INSECURE=true
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_AUTH_GENERIC_OAUTH_ENABLED=true
+      - GF_AUTH_GENERIC_OAUTH_NAME=Oauth
+      - GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP=true
+      - GF_AUTH_GENERIC_OAUTH_CLIENT_ID=grafana
+      - GF_AUTH_GENERIC_OAUTH_EMAIL_ATTRIBUTE_NAME=email:primary
+      - GF_AUTH_GENERIC_OAUTH_SCOPES=openid profile email
+      - GF_AUTH_GENERIC_OAUTH_AUTH_URL=${GRAFANA_KC_HOST}/realms/${GRAFANA_KC_REALM}/protocol/openid-connect/auth
+      - GF_AUTH_GENERIC_OAUTH_TOKEN_URL=${GRAFANA_KC_HOST}/realms/${GRAFANA_KC_REALM}/protocol/openid-connect/token
+      - GF_AUTH_GENERIC_OAUTH_API_URL=${GRAFANA_KC_HOST}/realms/${GRAFANA_KC_REALM}/protocol/openid-connect/userinfo
+    volumes:
+      - ./monitoring/prometheus-datasource.yml:/etc/grafana/provisioning/datasources/prometheus-datasource.yml:ro
+      - ./monitoring/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./monitoring/dashboards:/etc/grafana/provisioning/dashboards/keycloak:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '0.3'
+          memory: 1100M
+    security_opt:
+      - no-new-privileges:true
+    logging: *json-logging
+
+networks:
+  keycloak:
+  monitoring:
+
+volumes:
+  prometheus_data: {}
